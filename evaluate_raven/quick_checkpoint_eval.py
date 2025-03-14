@@ -1,10 +1,9 @@
 from lm_eval.api.model import TemplateLM
 
-
 from typing import List, Tuple, TypedDict, Optional
 import torch
 import torch.nn.functional as F
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 import sys
 from pathlib import Path
@@ -39,6 +38,16 @@ export http_proxy=http://proxy.ccs.ornl.gov:3128/
 export https_proxy="http://proxy.ccs.ornl.gov:3128/"
 export HTTPS_PROXY="http://proxy.ccs.ornl.gov:3128/"
 """
+
+
+# Disable Flash Attention if it's causing issues
+torch.backends.cuda.enable_flash_sdp(False)
+
+# Enable memory-efficient and math implementations
+torch.backends.cuda.enable_mem_efficient_sdp(True)
+torch.backends.cuda.enable_math_sdp(True)
+
+print("CUDA SDP backend settings adjusted")
 
 
 class AmpSettings(TypedDict):
@@ -324,22 +333,45 @@ def prepare_results(results, save_filepath, print_results=True):
     # return make_table(results, "groups")
 
 
+# class RecurrentHFLM(HFLM):
+#     def __init__(self, pretrained=None, revision="main", subfolder=None, tokenizer=None, device="cuda", recurrence=32, **kwargs):
+#         self.recurrence = recurrence
+#         super().__init__(pretrained=pretrained, revision=revision, subfolder=subfolder, tokenizer=tokenizer, device=device, **kwargs)
+        
+#         # If your model has a config attribute that controls recurrence
+#         if hasattr(self.model, 'config'):
+#             # Set recurrence parameter in model config if possible
+#             if hasattr(self.model.config, 'mean_recurrence'):
+#                 self.model.config.mean_recurrence = self.recurrence
+        
+#     def _loglikelihood_tokens(self, requests, disable_tqdm=False):
+#         # Modify the method to include recurrence settings
+#         # This is where your custom recurrence logic would go
+#         # You might need to copy some code from the RecurrentGPTWrapper
+        
+#         # Then either call the parent method or implement your own version
+#         return super()._loglikelihood_tokens(requests, disable_tqdm=disable_tqdm)
+
+
 def quick_eval_check(
-    checkpoint_name="/is/cluster/fast/jgeiping/recllm/outputs/magpie2/checkpoints-DDPStrategy/step-00439553-magpie_cooldown_32_8.pth",
-    tokenizer_path="/lustre/orion/csc569/scratch/njain17/new_workspace/holder/lit-gpt-dev/jonas_models/hf_model_12k_pretrained",
-    device=torch.device("cuda"),
+    # checkpoint_name="/is/cluster/fast/jgeiping/recllm/outputs/magpie2/checkpoints-DDPStrategy/step-00439553-magpie_cooldown_32_8.pth",
+    # tokenizer_path="/lustre/orion/csc569/scratch/njain17/new_workspace/holder/lit-gpt-dev/jonas_models/hf_model_12k_pretrained",
+    model_path="tomg-group-umd/huginn-0125",
+    tokenizer_path="tomg-group-umd/huginn-0125",
+    device=torch.device("cuda:0"),
     out_dir="outputs/eval",
-    # tasks="arc_easy,hellaswag",
+    # tasks="arc_easy",
+    tasks="gsm8k",
     # tasks="arc_easy,hellaswag,triviaqa,tinyMMLU",
     # tasks="arc_easy,hellaswag,triviaqa,tinyMMLU,piqa,openbookqa",
     # tasks="arc_easy,hellaswag,triviaqa,tinyMMLU,piqa,openbookqa",
-    tasks="arc_easy,tinyHellaswag,tinyMMLU,piqa,openbookqa",
+    # tasks="arc_easy,tinyHellaswag,tinyMMLU,piqa,openbookqa",
     # gsm8k_cot,mathqa,bbh_fewshot_logical_deduction_five_objects,mmlu_abstract_algebra,agieval_math
     num_fewshot=0,
-    batch_size=16,
+    batch_size=4096*16,
     limit=None,
     seed=233,
-    recurrence=32,
+    recurrence=1,
 ):
     # print gpus available
     print(f"Available GPUs: {torch.cuda.device_count()}")
@@ -359,17 +391,23 @@ def quick_eval_check(
         return
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    model_name = checkpoint_name.split("/")[-1].split(".")[0]
+    # model_name = checkpoint_name.split("/")[-1].split(".")[0]
+    model_name = model_path.split("/")[-1]
     base_dir = out_dir / model_name
     save_filepath = out_dir / Path(f"results_{tasks}_{model_name}_{recurrence}.json")
 
     from lm_eval import evaluator
+    from lm_eval.models.huggingface import HFLM
 
     print(f"Running evaluation on tasks: {tasks}")
-    print(f"Checkpoint: {checkpoint_name}")
-    model = RecurrentGPTWrapper(
-        checkpoint_name, tokenizer_path, device=device, batch_size=batch_size, recurrence=recurrence
-    )
+    print(f"Model: {model_name}")
+    # model = RecurrentGPTWrapper(
+    #     checkpoint_name, tokenizer_path, device=device, batch_size=batch_size, recurrence=recurrence
+    # )
+
+    # model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True).to(device=device)
+    model = HFLM(pretrained=model_path, device=str(device))
+    print("Device is:", device)
 
     results = evaluator.simple_evaluate(
         model=model,
@@ -378,9 +416,10 @@ def quick_eval_check(
         batch_size=batch_size,
         device=str(device),
         limit=limit,
-        random_seed=seed,
-        numpy_random_seed=seed,
-        torch_random_seed=seed,
+        random_seed=1,
+        numpy_random_seed=1,
+        torch_random_seed=1,
+        gen_kwargs="num_steps=1",
     )
     prepare_results(results, save_filepath)
 
@@ -389,14 +428,14 @@ def quick_eval_check(
         key: round(value.get("acc_norm,none", value.get("acc,none")), 4)
         for key, value in results["results"].items()  # type: ignore
     }
-    import wandb
+    # import wandb
 
-    wandb.init(
-        entity="tomg-group-umd", project="recurrence_lm_eval_test", name=f"{model_name}_{recurrence}rec", dir=out_dir
-    )
-    wandb.log({"recurrence": recurrence, "base_dir": str(base_dir)})
-    steps = int(model_name.split("-")[-2])
-    wandb.log(result_dict, step=steps)
+    # wandb.init(
+    #     entity="tomg-group-umd", project="recurrence_lm_eval_test", name=f"{model_name}_{recurrence}rec", dir=out_dir
+    # )
+    # wandb.log({"recurrence": recurrence, "base_dir": str(base_dir)})
+    # steps = int(model_name.split("-")[-2])
+    # wandb.log(result_dict, step=steps)
     print(f"result_dict: {result_dict}")
 
 
