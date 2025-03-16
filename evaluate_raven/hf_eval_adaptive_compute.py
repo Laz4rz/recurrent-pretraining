@@ -191,7 +191,7 @@ if __name__ == "__main__":
     parser.add_argument("--task-name", dest="task_name", type=str, default="gsm8k", help="Task to evaluate on")
     parser.add_argument("--model-name", dest="model_name", type=str, default="tomg-group-umd/huginn-0125", help="Model to evaluate")
     parser.add_argument("--device", type=str, default="cuda", help="Device to run on (cuda, cpu)")
-    parser.add_argument("--batch-size", dest="batch_size", type=int, default=16, help="Batch size for evaluation")
+    parser.add_argument("--batch-size", dest="batch_size", type=int, default=4, help="Batch size for evaluation")
     parser.add_argument("--num-fewshot", dest="num_fewshot", type=int, default=5, help="Number of few-shot examples")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of examples to evaluate")
     parser.add_argument("--criterion", type=str, default="entropy-diff", 
